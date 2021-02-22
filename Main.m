@@ -2,9 +2,9 @@
 % for running simulations in "Real-time Minimization of Mechanical Specific 
 % Energy with Multivariable Extremum Seeking"
 % This script requires acces to: 
-% formation1.m, formation2.m, sat.m, squareWave.m and smoothstep.m
+% formation1.m, formation2.m, squareWave.m and smoothstep.m
 
-% Magnus Nystad, 18 Jan 2021, magnus.nystad@ntnu.no
+% Magnus Nystad, 22 Feb, 2021
 
 tic
 %% Detournay model parameters
@@ -55,17 +55,14 @@ k_WOB = 0.001;              % 0.001 for clean data
 k_RPM = 0.05;               % 0.05 for clean data
 t_LSE = period;             % sliding window "size" for LS gradient estimation, [s]
 g1 = 0;                     % Initial gradient 1, dMSE/dWOB
-g2 = 0;                     % initial gradient 2, dROP/dWOB
-g3 = 0;                     % Initial gradient 3, dMSE/dRPM
-g3_avg = 0;                 % initial avg gradient 3
-g4 = 0;                     % initial gradient 4, dROP/dRPM
-g5 = 0;                     % initial gradient 5, dT/dWOB
+g2 = 0;                     % initial gradient 2, dMSE/dRPM
+g3 = 0;                     % Initial gradient 3, dT/dWOB
 adapt_WOB = 0;              % initial WOB adaptation
 adapt_RPM = 0;              % initial RPM adaptation
 
 % Constraint handling
-ROP_limit = 200;            % [m/hr] high value --> no constraint handling
-T_limit = 100000;           % [Nm] high value --> no constraint handling
+ROP_limit = 200;            % high value --> no constraint handling
+T_limit = 100000;           % high value --> no constraint handling
 SF1 = 2;                    % Safety factor in predictive constraint handling
 K_p = 0.05;                 % Proporional gain, reactive constraint handling
 K_i = 0.001;                % Integral gain, reactive constraint handling
@@ -96,20 +93,18 @@ dd_store = zeros(1,time_max);
 adapt_WOB_store = zeros(1,time_max);
 adapt_RPM_store = zeros(1,time_max);
 dMSEdWOB_store = zeros(1,time_max);
-dROPdWOB_store = zeros(1,time_max);
 dMSEdRPM_store = zeros(1,time_max);
-dMSEdRPM_mavg_store = zeros(1,time_max);
-dROPdRPM_store = zeros(1,time_max);
+dTdWOB_store = zeros(1,time_max);
 
 % Initial parameters
-WOB_SP = 13000;             % initial WOB setpoint, [kg]
+WOB_SP = 13000;              % initial WOB setpoint, [kg]
 WOB = 0;                    % actual WOB at t=0
 WOB_0 = WOB_SP;             % initial "base" WOB, [kg]
-RPM_SP = 90;                % initial RPM setpoint, [rpm]
+RPM_SP = 90;               % initial RPM setpoint, [rpm]
 RPM = 0;                    % actual RPM at t=0
 RPM_0 = RPM_SP;             % initial "base" RPM
 dd = 0;
-torque_jump = 0;            % initiate torque jump val = 0
+torque_jump = 0;
 dd_fm_switch1 = 5;          % drilled depth [m] for formation shift 1
 dd_fm_switch2 = 23;         % drilled depth [m] for formation shift 2
 torque_jump_val = 0;        % ad hoc implementation of sudden torque increase, 1000-2000 Nm
@@ -129,7 +124,7 @@ for i = 1:time_max
         shift2 = i;     % time index @ formation shift 2
     end
     
-        
+    
     % Ad hoc torque jump implementation
     if i == torque_jump_time
         torque_jump = torque_jump_val;
@@ -164,33 +159,28 @@ for i = 1:time_max
     if i > t_start_WOB                  % start WOB dither signal
         
         if i > t0                       % start adaptation, after 1 period of dither signal
-            % Estimate gradient(s)
+            % Estimate gradient
+            grad = regress(MSE_buffer',[ones(period,1),WOB_buffer',RPM_buffer']); % Solve eq. 9 in paper, grad = [b,a_wob,a_rpm]
+            g1 = grad(2);       % dMSE/dWOB
+            g2 = grad(3);       % dMSE/dRPM
+          
             if A_WOB > 0                % Test if WOB-dither is active, avoid polyfit issues
-                p = polyfit(WOB_buffer,MSE_buffer,1);
-                g1 = p(1);                                          % dMSE/dWOB [MPa/kg]
-                p = polyfit(WOB_buffer,ROP_buffer,1);
-                g2 = p(1);                                          % dROP/dWOB [m/hr/kg]
+
                 adapt_WOB = sat(g1-k_WOB,2*k_WOB)*K_esc_WOB*dt;
-                % Predictive torque constraint
+                
+                % Calculate Torque-WOB relation
                 p = polyfit(WOB_buffer,T_buffer,1);                 %dT/dWOB
-                g5 = p(1);
+                g3 = p(1);
             end
              
             if A_RPM > 0        % after 1 adaptation-free period of RPM signal, and RPM dither activated
-                p = polyfit(RPM_buffer,MSE_buffer,1);
-                g3 = p(1);                                      % dMSE/dRPM [MPa/rpm]
-                p = polyfit(RPM_buffer,ROP_buffer,1);
-                g4 = p(1);                                      % dROP/dRPM [m/hr/rpm]
-                
-                dMSEdRPM_buffer = [dMSEdRPM_buffer(2:end),g3];
-                g3_avg = mean(dMSEdRPM_buffer);                 % average gradient
-                adapt_RPM = sat(g3-k_RPM,2*k_RPM)*K_esc_RPM*dt; % RPM adaptation
+                adapt_RPM = sat(g2-k_RPM,2*k_RPM)*K_esc_RPM*dt; % RPM adaptation
             end
             
         end
         
         % Predictive torque constraint
-        if (T_avg + A_WOB*g5*SF1) > T_limit
+        if (T_avg + A_WOB*g3*SF1) > T_limit
             adapt_WOB = 0;
         end
         
@@ -229,10 +219,8 @@ for i = 1:time_max
     adapt_WOB_store(i) = adapt_WOB;
     adapt_RPM_store(i) = adapt_RPM;
     dMSEdWOB_store(i) = g1;
-    dROPdWOB_store(i) = g2;
-    dMSEdRPM_store(i) = g3;
-    dMSEdRPM_mavg_store(i) = g3_avg;
-    dROPdRPM_store(i) = g4;
+    dMSEdRPM_store(i) = g2;
+    dTdWOB_store(i) = g3;
 end
 
 toc
